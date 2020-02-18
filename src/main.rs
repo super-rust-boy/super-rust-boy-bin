@@ -43,7 +43,7 @@ use vulkano::{
         SamplerAddressMode
     },
     swapchain::{
-        Swapchain, SurfaceTransform, PresentMode, acquire_next_image
+        Swapchain, SurfaceTransform, PresentMode, acquire_next_image, CompositeAlpha
     },
     sync::{
         now, GpuFuture
@@ -59,6 +59,7 @@ use vulkano::{
         Dimensions,
         immutable::ImmutableImage
     },
+    format::Format
 };
 
 use vulkano_win::VkSurfaceBuild;
@@ -106,7 +107,7 @@ fn main() {
     let mut rustboy = RustBoy::new(&cart, &save_file, palette, cmd_args.is_present("mute"));
 
     //let mut averager = avg::Averager::<i64>::new(60);
-    let frame_tex = [0; 160 * 144 * 4];
+    let mut frame_tex = [0_u8; 160 * 144 * 4];
 
     if cmd_args.is_present("debug") {
         #[cfg(feature = "debug")]
@@ -168,12 +169,13 @@ fn main() {
                     .expect("Failed to get surface capabilities");
             let dimensions = caps.current_extent.unwrap_or([160, 144]);
 
-            let alpha = caps.supported_composite_alpha.iter().next().unwrap();
+            //let alpha = caps.supported_composite_alpha.iter().next().unwrap();
+            //println!("{:?}", caps.supported_formats);
             let format = caps.supported_formats[0].0;
 
             (Swapchain::new(device.clone(), surface.clone(),
                 caps.min_image_count, format, dimensions, 1, caps.supported_usage_flags, &queue,
-                SurfaceTransform::Identity, alpha, PresentMode::Fifo, true, None
+                SurfaceTransform::Identity, CompositeAlpha::Opaque, PresentMode::Fifo, true, None
             ).expect("Failed to create swapchain"),
             DynamicState {
                 viewports: Some(vec![Viewport {
@@ -246,7 +248,7 @@ fn main() {
             let frame = Utc::now();
 
             read_inputs(&mut events_loop, &mut rustboy);
-            rustboy.frame(frame_tex);
+            rustboy.frame(&mut frame_tex);
 
             // Get current framebuffer index from the swapchain.
             let (image_num, acquire_future) = acquire_next_image(swapchain.clone(), None).expect("Didn't get next image");
@@ -255,7 +257,7 @@ fn main() {
             let (image, image_future) = ImmutableImage::from_iter(
                 frame_tex.iter().cloned(),
                 Dimensions::Dim2d { width: 160, height: 144 },
-                swapchain.format(),
+                Format::R8G8B8A8Unorm,
                 queue.clone()
             ).expect("Couldn't create image.");
 
