@@ -107,7 +107,7 @@ fn main() {
     let mut rustboy = RustBoy::new(&cart, &save_file, palette, cmd_args.is_present("mute"));
 
     //let mut averager = avg::Averager::<i64>::new(60);
-    let mut frame_tex = [0_u8; 160 * 144 * 4];
+    let mut frame_tex = [255_u8; 160 * 144 * 4];
 
     if cmd_args.is_present("debug") {
         #[cfg(feature = "debug")]
@@ -250,6 +250,10 @@ fn main() {
             read_inputs(&mut events_loop, &mut rustboy);
             rustboy.frame(&mut frame_tex);
 
+            /*for pix in frame_tex.chunks(4) {
+                println!("r: {}, g: {}, b: {}", pix[0], pix[1], pix[2]);
+            }*/
+
             // Get current framebuffer index from the swapchain.
             let (image_num, acquire_future) = acquire_next_image(swapchain.clone(), None).expect("Didn't get next image");
 
@@ -257,7 +261,7 @@ fn main() {
             let (image, image_future) = ImmutableImage::from_iter(
                 frame_tex.iter().cloned(),
                 Dimensions::Dim2d { width: 160, height: 144 },
-                Format::R8G8B8A8Unorm,
+                Format::R8G8B8A8Uint,
                 queue.clone()
             ).expect("Couldn't create image.");
 
