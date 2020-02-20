@@ -15,5 +15,5 @@ winit = "0.19"
 chrono = "0.4"  #TODO: use alternative here.
 
 [dependencies.rustboy]
-path = "../super-rust-boy"
+git = "https://github.com/super-rust-boy/super-rust-boy"
 features = ["debug"]
