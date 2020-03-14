@@ -1,6 +1,6 @@
 [package]
 name = "super-rust-boy-bin"
-version = "0.1.0"
+version = "0.6.0"
 authors = ["Simon Cooper <simon.d.cooper@hotmail.co.uk>"]
 edition = "2018"
 
@@ -17,5 +17,6 @@ cpal = "0.11"
 
 [dependencies.rustboy]
 git = "https://github.com/super-rust-boy/super-rust-boy"
+tag = "0.6.0"
 #path = "../super-rust-boy"
 features = ["debug"]
