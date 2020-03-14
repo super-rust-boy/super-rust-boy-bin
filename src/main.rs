@@ -112,20 +112,7 @@ fn main() {
     // Video
     let mut events_loop = EventsLoop::new();
 
-    // Audio
-    let host = cpal::default_host();
-    let event_loop = host.event_loop();
-    let device = host.default_output_device().expect("no output device available.");
-    let mut supported_formats_range = device.supported_output_formats()
-        .expect("error while querying formats");
-    let format = supported_formats_range.next()
-        .expect("No supported format")
-        .with_max_sample_rate();
-    let stream_id = event_loop.build_output_stream(&device, &format).unwrap();
-    let sample_rate = format.sample_rate.0 as usize;
-
     let mut rustboy = RustBoy::new(&cart, &save_file, palette);
-    let mut audio_handler = rustboy.enable_audio(sample_rate);
 
     //let mut averager = avg::Averager::<i64>::new(60);
     let mut frame_tex = [255_u8; 160 * 144 * 4];
@@ -134,47 +121,9 @@ fn main() {
         #[cfg(feature = "debug")]
         debug::debug_mode(&mut rustboy);
     } else {
-        std::thread::spawn(move || {
-            event_loop.play_stream(stream_id).expect("Stream could not start.");
-    
-            event_loop.run(move |_stream_id, stream_result| {
-                use cpal::StreamData::*;
-                use cpal::UnknownTypeOutputBuffer::*;
-    
-                let stream_data = match stream_result {
-                    Ok(data) => data,
-                    Err(e) => {
-                        eprintln!("An error occurred in audio handler: {}", e);
-                        return;
-                    }
-                };
-    
-                match stream_data {
-                    Output { buffer: U16(mut buffer) } => {
-                        let mut packet = vec![0.0; buffer.len()];
-                        audio_handler.get_audio_packet(&mut packet);
-                        for (out, p) in buffer.chunks_exact_mut(2).zip(packet.chunks_exact(2)) {
-                            for (elem, f) in out.iter_mut().zip(p.iter()) {
-                                *elem = (f * u16::max_value() as f32) as u16
-                            }
-                        }
-                    },
-                    Output { buffer: I16(mut buffer) } => {
-                        let mut packet = vec![0.0; buffer.len()];
-                        audio_handler.get_audio_packet(&mut packet);
-                        for (out, p) in buffer.chunks_exact_mut(2).zip(packet.chunks_exact(2)) {
-                            for (elem, f) in out.iter_mut().zip(p.iter()) {
-                                *elem = (f * i16::max_value() as f32) as i16
-                            }
-                        }
-                    },
-                    Output { buffer: F32(mut buffer) } => {
-                        audio_handler.get_audio_packet(&mut buffer);
-                    },
-                    _ => {},
-                }
-            });
-        });
+        if !cmd_args.is_present("mute") {
+            run_audio(&mut rustboy);
+        }
 
         // Make instance with window extensions.
         let instance = {
@@ -421,6 +370,62 @@ fn read_inputs(events_loop: &mut EventsLoop, rustboy: &mut RustBoy) {
             },
             _ => {},
         }
+    });
+}
+
+fn run_audio(rustboy: &mut RustBoy) {
+    let host = cpal::default_host();
+    let event_loop = host.event_loop();
+    let device = host.default_output_device().expect("no output device available.");
+    let mut supported_formats_range = device.supported_output_formats()
+        .expect("error while querying formats");
+    let format = supported_formats_range.next()
+        .expect("No supported format")
+        .with_max_sample_rate();
+    let stream_id = event_loop.build_output_stream(&device, &format).unwrap();
+    let sample_rate = format.sample_rate.0 as usize;
+
+    let mut audio_handler = rustboy.enable_audio(sample_rate);
+    std::thread::spawn(move || {
+        event_loop.play_stream(stream_id).expect("Stream could not start.");
+
+        event_loop.run(move |_stream_id, stream_result| {
+            use cpal::StreamData::*;
+            use cpal::UnknownTypeOutputBuffer::*;
+
+            let stream_data = match stream_result {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("An error occurred in audio handler: {}", e);
+                    return;
+                }
+            };
+
+            match stream_data {
+                Output { buffer: U16(mut buffer) } => {
+                    let mut packet = vec![0.0; buffer.len()];
+                    audio_handler.get_audio_packet(&mut packet);
+                    for (out, p) in buffer.chunks_exact_mut(2).zip(packet.chunks_exact(2)) {
+                        for (elem, f) in out.iter_mut().zip(p.iter()) {
+                            *elem = (f * u16::max_value() as f32) as u16
+                        }
+                    }
+                },
+                Output { buffer: I16(mut buffer) } => {
+                    let mut packet = vec![0.0; buffer.len()];
+                    audio_handler.get_audio_packet(&mut packet);
+                    for (out, p) in buffer.chunks_exact_mut(2).zip(packet.chunks_exact(2)) {
+                        for (elem, f) in out.iter_mut().zip(p.iter()) {
+                            *elem = (f * i16::max_value() as f32) as i16
+                        }
+                    }
+                },
+                Output { buffer: F32(mut buffer) } => {
+                    audio_handler.get_audio_packet(&mut buffer);
+                },
+                _ => {},
+            }
+        });
     });
 }
 
