@@ -5,9 +5,18 @@ on:
     branches: [ master ]
 
 jobs:
-  build:
+  build-macOS:
 
     runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build
+      run: cargo build --verbose
+      
+  build-windows:
+
+    runs-on: windows-latest
 
     steps:
     - uses: actions/checkout@v2
