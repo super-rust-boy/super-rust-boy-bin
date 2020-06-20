@@ -112,7 +112,8 @@ fn main() {
     // Video
     let mut events_loop = EventsLoop::new();
 
-    let mut rustboy = RustBoy::new(&cart, &save_file, palette);
+    let rom_type = ROMType::File(cart);
+    let mut rustboy = RustBoy::new(rom_type, &save_file, palette);
 
     //let mut averager = avg::Averager::<i64>::new(60);
     let mut frame_tex = [255_u8; 160 * 144 * 4];
