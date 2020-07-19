@@ -6,7 +6,6 @@ mod debug;
 use rustboy::*;
 
 use clap::{clap_app, crate_version};
-use chrono::Utc;
 
 use winit::{
     dpi::{
@@ -60,9 +59,6 @@ fn main() {
     //let rom_type = ROMType::File(cart);
     let mut rustboy = RustBoy::new(&cart, &save_file, palette);
     let cart_name = rustboy.cart_name();
-
-    //let mut averager = avg::Averager::<i64>::new(60);
-    let mut frame_tex = [255_u8; 160 * 144 * 4];
 
     if cmd_args.is_present("debug") {
         #[cfg(feature = "debug")]
@@ -370,7 +366,6 @@ fn choose_palette(palette: Option<&str>) -> UserPalette {
 }
 
 fn run_audio(rustboy: &mut RustBoy) {
-    use cpal;
     use cpal::traits::{
         HostTrait,
         DeviceTrait,
@@ -431,41 +426,3 @@ fn run_audio(rustboy: &mut RustBoy) {
         });
     });
 }
-
-/*
-// Averager
-
-use std::{
-    collections::VecDeque,
-    ops::{
-        Add,
-        Div
-    }
-};
-
-pub struct Averager<T: Add + Div> {
-    queue:      VecDeque<T>,
-    max_len:    usize
-}
-
-impl Averager<i64> {
-    pub fn new(len: usize) -> Self {
-        Averager {
-            queue:      VecDeque::with_capacity(len),
-            max_len:    len
-        }
-    }
-
-    pub fn add(&mut self, data: i64) {
-        self.queue.push_back(data);
-
-        if self.queue.len() > self.max_len {
-            self.queue.pop_front();
-        }
-    }
-
-    pub fn get_avg(&self) -> i64 {
-        self.queue.iter().sum::<i64>() / (self.queue.len() as i64)
-    }
-}
-*/
