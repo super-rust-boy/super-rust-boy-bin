@@ -1,6 +1,6 @@
 [package]
 name = "super-rust-boy-bin"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["Simon Cooper <simon.d.cooper@hotmail.co.uk>"]
 edition = "2018"
 
@@ -8,15 +8,20 @@ edition = "2018"
 
 [dependencies]
 clap = "2"
-vulkano = "0.16"
-vulkano-shaders = "0.16"
-vulkano-win = "0.16"
-winit = "0.19"
-chrono = "0.4"  #TODO: use alternative here.
+chrono = "0.4"
+
+# Graphics
+bytemuck = "1.2.0"
+futures = "0.3.5"
+metal = "=0.18.0"
+wgpu = "0.5.2"
+winit = "0.22"
+
+# Audio
 cpal = "0.11"
 
 [dependencies.rustboy]
 git = "https://github.com/super-rust-boy/super-rust-boy"
-tag = "0.6.0"
+tag = "0.7.0"
 #path = "../super-rust-boy"
-features = ["debug"]
+#features = ["debug"]
