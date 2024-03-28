@@ -3,85 +3,39 @@ extern crate rustboy;
 #[cfg(feature = "debug")]
 mod debug;
 
-mod shaders;
-
 use rustboy::*;
 
 use cpal;
-use cpal::traits::{
-    HostTrait,
-    DeviceTrait,
-    EventLoopTrait
-};
 use clap::{clap_app, crate_version};
-use chrono::Utc;
+use wgpu::util::DeviceExt;
 use winit::{
-    EventsLoop,
-    Event,
-    WindowEvent,
-    WindowBuilder,
-    ElementState,
-    VirtualKeyCode
+    dpi::{
+        Size, LogicalSize
+    },
+    event::{
+        Event, WindowEvent,
+        ElementState,
+        VirtualKeyCode
+    },
+    event_loop::EventLoop,
+    window::WindowBuilder
 };
-
-use vulkano::{
-    instance::{
-        Instance, PhysicalDevice
-    },
-    device::{
-        Device, DeviceExtensions
-    },
-    framebuffer::{
-        Framebuffer, Subpass, FramebufferAbstract, RenderPassAbstract
-    },
-    pipeline::{
-        GraphicsPipeline,
-        viewport::Viewport
-    },
-    command_buffer::{
-        AutoCommandBufferBuilder,
-        DynamicState
-    },
-    sampler::{
-        Filter,
-        MipmapMode,
-        Sampler,
-        SamplerAddressMode
-    },
-    swapchain::{
-        Swapchain, SurfaceTransform, PresentMode, acquire_next_image, CompositeAlpha
-    },
-    sync::{
-        now, GpuFuture
-    },
-    descriptor::{
-        descriptor_set::FixedSizeDescriptorSetsPool,
-    },
-    buffer::{
-        BufferUsage,
-        ImmutableBuffer
-    },
-    image::{
-        Dimensions,
-        immutable::ImmutableImage
-    },
-    format::Format
-};
-
-use vulkano_win::VkSurfaceBuild;
+use cpal::traits::StreamTrait;
 use std::sync::Arc;
 
 
 const FRAME_TIME: i64 = 16_666;
 //const FRAME_TIME: i64 = 16_743; // 59.73 fps
 
-#[derive(Default, Debug, Clone)]
+#[repr(C)]
+#[derive(Default, Debug, Clone, Copy)]
 struct Vertex {
     position:   [f32; 2],
     tex_coord:  [f32; 2]
 }
 
-vulkano::impl_vertex!(Vertex, position, tex_coord);
+unsafe impl bytemuck::Zeroable for Vertex {}
+unsafe impl bytemuck::Pod for Vertex {}
 
 fn main() {
     let app = clap_app!(rustboy =>
@@ -97,6 +51,8 @@ fn main() {
 
     let cmd_args = app.get_matches();
 
+    let mute = cmd_args.is_present("mute");
+
     let cart = match cmd_args.value_of("CART") {
         Some(c) => c.to_string(),
         None => panic!("Usage: rustboy [cart name]. Run with --help for more options."),
@@ -110,7 +66,7 @@ fn main() {
     let palette = choose_palette(cmd_args.value_of("palette"));
 
     // Video
-    let mut events_loop = EventsLoop::new();
+    let event_loop = EventLoop::new();//.expect("could not create event loop");
 
     let mut rustboy = RustBoy::new(&cart, &save_file, palette);
 
@@ -121,199 +77,273 @@ fn main() {
         #[cfg(feature = "debug")]
         debug::debug_mode(&mut rustboy);
     } else {
-        if !cmd_args.is_present("mute") {
-            run_audio(&mut rustboy);
-        }
-
-        // Make instance with window extensions.
-        let instance = {
-            let extensions = vulkano_win::required_extensions();
-            Instance::new(None, &extensions, None).expect("Failed to create vulkan instance")
-        };
-
-        // Get graphics device.
-        let physical = PhysicalDevice::enumerate(&instance).next()
-            .expect("No device available");
-
-        // Get graphics command queue family from graphics device.
-        let queue_family = physical.queue_families()
-            .find(|&q| q.supports_graphics())
-            .expect("Could not find a graphical queue family");
-
-        // Make software device and queue iterator of the graphics family.
-        let (device, mut queues) = {
-            let device_ext = DeviceExtensions{
-                khr_swapchain: true,
-                .. DeviceExtensions::none()
-            };
-            
-            Device::new(physical, physical.supported_features(), &device_ext,
-                        [(queue_family, 0.5)].iter().cloned())
-                .expect("Failed to create device")
-        };
-
-        // Get a queue from the iterator.
-        let queue = queues.next().unwrap();
-
-        // Make a surface.
-        let surface = WindowBuilder::new()
-            .with_dimensions((320, 288).into())
+        let window = WindowBuilder::new()
+            .with_inner_size(Size::Logical(LogicalSize{width: 320.0, height: 288.0}))
             .with_title("Super Rust Boy")
-            .build_vk_surface(&events_loop, instance.clone())
-            .expect("Couldn't create surface");
+            .build(&event_loop)
+            .expect("Couldn't create window");
 
-        // Make the sampler for the texture.
-        let sampler = Sampler::new(
-            device.clone(),
-            Filter::Nearest,
-            Filter::Nearest,
-            MipmapMode::Nearest,
-            SamplerAddressMode::Repeat,
-            SamplerAddressMode::Repeat,
-            SamplerAddressMode::Repeat,
-            0.0, 1.0, 0.0, 0.0
-        ).expect("Couldn't create sampler!");
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let surface = unsafe {instance.create_surface(&window)}.expect("could not create surface");
 
-        // Get a swapchain and images for use with the swapchain, as well as the dynamic state.
-        let ((swapchain, images), dynamic_state) = {
+        let adapter = futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        })).expect("Failed to find appropriate adapter");
 
-            let caps = surface.capabilities(physical)
-                    .expect("Failed to get surface capabilities");
-            let dimensions = caps.current_extent.unwrap_or([160, 144]);
+        let (device, queue) = futures::executor::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: None,
+            features: wgpu::Features::default(),
+            limits: wgpu::Limits::default()
+        }, None)).expect("Failed to create device");
 
-            //let alpha = caps.supported_composite_alpha.iter().next().unwrap();
-            //println!("{:?}", caps.supported_formats);
-            let format = caps.supported_formats[0].0;
 
-            (Swapchain::new(device.clone(), surface.clone(),
-                caps.min_image_count, format, dimensions, 1, caps.supported_usage_flags, &queue,
-                SurfaceTransform::Identity, CompositeAlpha::Opaque, PresentMode::Fifo, true, None
-            ).expect("Failed to create swapchain"),
-            DynamicState {
-                viewports: Some(vec![Viewport {
-                    origin: [0.0, 0.0],
-                    dimensions: [dimensions[0] as f32, dimensions[1] as f32],
-                    depth_range: 0.0 .. 1.0,
-                }]),
-                .. DynamicState::none()
-            })
+        let size = window.inner_size();
+        let mut surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            width: size.width,
+            height: size.height,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb]
         };
+        surface.configure(&device, &surface_config);
 
-        // Make the render pass to insert into the command queue.
-        let render_pass = Arc::new(vulkano::single_pass_renderpass!(device.clone(),
-            attachments: {
-                color: {
-                    load: Clear,
-                    store: Store,
-                    format: swapchain.format(),//Format::R8G8B8A8Unorm,
-                    samples: 1,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None
+                },
+            ]
+        });
+    
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[]
+        });
+    
+        let texture_extent = wgpu::Extent3d {
+            width: 160,
+            height: 144,
+            depth_or_array_layers: 1
+        };
+    
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            size: texture_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            label: None,
+            view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb]
+        });
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter:     wgpu::FilterMode::Nearest,
+            min_filter:     wgpu::FilterMode::Linear,
+            mipmap_filter:  wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+    
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view)
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler)
                 }
+            ],
+            label: None
+        });
+    
+        let vertices = vec![
+            Vertex{position: [-1.0, -1.0], tex_coord: [0.0, 1.0]},
+            Vertex{position: [1.0, -1.0], tex_coord: [1.0, 1.0]},
+            Vertex{position: [-1.0, 1.0], tex_coord: [0.0, 0.0]},
+            Vertex{position: [1.0, 1.0], tex_coord: [1.0, 0.0]},
+        ];
+    
+        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX
+        });
+    
+        let module = device.create_shader_module(wgpu::include_wgsl!("./shaders/shader.wgsl"));
+    
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 4 * 2,
+                            shader_location: 1,
+                        },
+                    ]
+                }]
             },
-            pass: {
-                color: [color],
-                depth_stencil: {}
-            }
-        ).unwrap()) as Arc<dyn RenderPassAbstract + Send + Sync>;
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                .. Default::default()
+                /*front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,*/
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })]
+            }),
+            multiview: None
+        });
 
-        let framebuffers = images.iter().map(|image| {
-            Arc::new(
-                Framebuffer::start(render_pass.clone())
-                    .add(image.clone()).unwrap()
-                    .build().unwrap()
-            ) as Arc<dyn FramebufferAbstract + Send + Sync>
-        }).collect::<Vec<_>>();
-
-        // Assemble
-        let vs = shaders::vs::Shader::load(device.clone()).expect("failed to create vertex shader");
-        let fs = shaders::fs::Shader::load(device.clone()).expect("failed to create fragment shader");
-
-        // Make pipeline.
-        let pipeline = Arc::new(GraphicsPipeline::start()
-            .vertex_input_single_buffer::<Vertex>()
-            .vertex_shader(vs.main_entry_point(), ())
-            .triangle_strip()
-            .viewports_dynamic_scissors_irrelevant(1)
-            .fragment_shader(fs.main_entry_point(), ())
-            .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-            .build(device.clone())
-            .unwrap()
-        );
-
-        // Make descriptor set pools.
-        let mut set_pool = FixedSizeDescriptorSetsPool::new(pipeline.clone(), 0);
-
-        let (vertices, vertex_future) = ImmutableBuffer::from_iter(
-            vec![
-                Vertex{position: [-1.0, -1.0], tex_coord: [0.0, 0.0]},
-                Vertex{position: [1.0, -1.0], tex_coord: [1.0, 0.0]},
-                Vertex{position: [-1.0, 1.0], tex_coord: [0.0, 1.0]},
-                Vertex{position: [1.0, 1.0], tex_coord: [1.0, 1.0]},
-            ].into_iter(),
-            BufferUsage::vertex_buffer(),
-            queue.clone()
-        ).unwrap();
-
-        let mut previous_frame_future = Box::new(vertex_future) as Box<dyn GpuFuture>;
-
-        loop {
-            //println!("Frame");
-            let frame = Utc::now();
-
-            read_inputs(&mut events_loop, &mut rustboy);
-            rustboy.frame(&mut frame_tex);
-
-            // Get current framebuffer index from the swapchain.
-            let (image_num, acquire_future) = acquire_next_image(swapchain.clone(), None).expect("Didn't get next image");
-
-            // Get image with current texture.
-            let (image, image_future) = ImmutableImage::from_iter(
-                frame_tex.iter().cloned(),
-                Dimensions::Dim2d { width: 160, height: 144 },
-                Format::R8G8B8A8Uint,
-                queue.clone()
-            ).expect("Couldn't create image.");
-
-            // Make descriptor set to bind texture.
-            let set0 = Arc::new(set_pool.next()
-                .add_sampled_image(image, sampler.clone()).unwrap()
-                .build().unwrap());
-
-            // Start building command buffer using pipeline and framebuffer, starting with the background vertices.
-            let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
-                .begin_render_pass(framebuffers[image_num].clone(), false, vec![[1.0, 0.0, 0.0, 1.0].into()]).unwrap()
-                .draw(
-                    pipeline.clone(),
-                    &dynamic_state,
-                    vertices.clone(),
-                    set0.clone(),
-                    ()
-                ).unwrap().end_render_pass().unwrap().build().unwrap();
-
-            // Wait until previous frame is done.
-            let mut now_future = Box::new(now(device.clone())) as Box<dyn GpuFuture>;
-            std::mem::swap(&mut previous_frame_future, &mut now_future);
-
-            // Wait until previous frame is done,
-            // _and_ the framebuffer has been acquired,
-            // _and_ the texture has been uploaded.
-            let future = now_future.join(acquire_future)
-                .join(image_future)
-                .then_execute(queue.clone(), command_buffer).unwrap()                   // Run the commands (pipeline and render)
-                .then_swapchain_present(queue.clone(), swapchain.clone(), image_num)    // Present newly rendered image.
-                .then_signal_fence_and_flush();                                         // Signal done and flush the pipeline.
-
-            match future {
-                Ok(future) => previous_frame_future = Box::new(future) as Box<_>,
-                Err(e) => println!("Err: {:?}", e),
-            }
-
-            previous_frame_future.cleanup_finished();
-
-            //averager.add((Utc::now() - frame).num_milliseconds());
-            //println!("Frame t: {}ms", averager.get_avg());
-
-            while (Utc::now() - frame) < chrono::Duration::microseconds(FRAME_TIME) {}  // Wait until next frame.
+        let audio_stream = make_audio_stream(&mut rustboy);
+        if !mute {
+            audio_stream.play().expect("Couldn't start audio stream");
         }
+
+        let mut last_frame_time = chrono::Utc::now();
+        let nanos = 1_000_000_000 / 60;
+        let frame_time = chrono::Duration::nanoseconds(nanos);
+
+        event_loop.run(move |event, _, control_flow| {
+            match event {
+                Event::LoopDestroyed => (),
+                Event::MainEventsCleared => {
+                    let now = chrono::Utc::now();
+                    let since_last = now.signed_duration_since(last_frame_time);
+                    if since_last < frame_time {
+                        return;
+                    }
+                    last_frame_time = now;
+
+                    rustboy.frame(&mut frame_tex);
+
+                    queue.write_texture(
+                        texture.as_image_copy(),
+                        &frame_tex, 
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(4 * texture_extent.width),
+                            rows_per_image: None,
+                        },
+                        texture_extent
+                    );
+
+                    let frame = surface.get_current_texture().expect("Timeout when acquiring next swapchain tex.");
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {label: None});
+
+                    {
+                        let view = frame.texture.create_view(&Default::default());
+                        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: None,
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None
+                        });
+                        rpass.set_pipeline(&render_pipeline);
+                        rpass.set_bind_group(0, &bind_group, &[]);
+                        rpass.set_vertex_buffer(0, vertex_buf.slice(..));
+                        rpass.draw(0..4, 0..1);
+                    }
+
+                    queue.submit([encoder.finish()]);
+                    frame.present();
+                },
+                Event::WindowEvent {
+                    window_id: _,
+                    event: w,
+                } => match w {
+                    WindowEvent::CloseRequested => {
+                        ::std::process::exit(0);
+                    },
+                    WindowEvent::KeyboardInput {
+                        device_id: _,
+                        input: k,
+                        is_synthetic: _,
+                    } => {
+                        let pressed = match k.state {
+                            ElementState::Pressed => true,
+                            ElementState::Released => false,
+                        };
+                        match k.virtual_keycode {
+                            Some(VirtualKeyCode::X)         => rustboy.set_button(Button::A, pressed),
+                            Some(VirtualKeyCode::Z)         => rustboy.set_button(Button::B, pressed),
+                            Some(VirtualKeyCode::Space)     => rustboy.set_button(Button::Select, pressed),
+                            Some(VirtualKeyCode::Return)    => rustboy.set_button(Button::Start, pressed),
+                            Some(VirtualKeyCode::Up)        => rustboy.set_button(Button::Up, pressed),
+                            Some(VirtualKeyCode::Down)      => rustboy.set_button(Button::Down, pressed),
+                            Some(VirtualKeyCode::Left)      => rustboy.set_button(Button::Left, pressed),
+                            Some(VirtualKeyCode::Right)     => rustboy.set_button(Button::Right, pressed),
+                            _ => {},
+                        }
+                    },
+                    WindowEvent::Resized(size) => {
+                        surface_config.width = size.width;
+                        surface_config.height = size.height;
+                        surface.configure(&device, &surface_config);
+                    },
+                    _ => {}
+                },
+                //Event::RedrawRequested(_) => {},
+                _ => {},
+            }
+        });
     }
 }
 
@@ -335,98 +365,50 @@ fn choose_palette(palette: Option<&str>) -> UserPalette {
     }
 }
 
-fn read_inputs(events_loop: &mut EventsLoop, rustboy: &mut RustBoy) {
-    events_loop.poll_events(|e| {
-        match e {
-            Event::WindowEvent {
-                window_id: _,
-                event: w,
-            } => match w {
-                WindowEvent::CloseRequested => {
-                    ::std::process::exit(0);
-                },
-                WindowEvent::KeyboardInput {
-                    device_id: _,
-                    input: k,
-                } => {
-                    let pressed = match k.state {
-                        ElementState::Pressed => true,
-                        ElementState::Released => false,
-                    };
-                    match k.virtual_keycode {
-                        Some(VirtualKeyCode::X)         => rustboy.set_button(Button::A, pressed),
-                        Some(VirtualKeyCode::Z)         => rustboy.set_button(Button::B, pressed),
-                        Some(VirtualKeyCode::Space)     => rustboy.set_button(Button::Select, pressed),
-                        Some(VirtualKeyCode::Return)    => rustboy.set_button(Button::Start, pressed),
-                        Some(VirtualKeyCode::Up)        => rustboy.set_button(Button::Up, pressed),
-                        Some(VirtualKeyCode::Down)      => rustboy.set_button(Button::Down, pressed),
-                        Some(VirtualKeyCode::Left)      => rustboy.set_button(Button::Left, pressed),
-                        Some(VirtualKeyCode::Right)     => rustboy.set_button(Button::Right, pressed),
-                        _ => {},
-                    }
-                },
-                //WindowEvent::Resized(_) => rustboy.on_resize(),
-                _ => {}
-            },
-            _ => {},
+fn pick_output_config(device: &cpal::Device) -> cpal::SupportedStreamConfigRange {
+    use cpal::traits::DeviceTrait;
+
+    const MIN: u32 = 32_000;
+
+    let supported_configs_range = device.supported_output_configs()
+        .expect("error while querying configs");
+
+    for config in supported_configs_range {
+        let cpal::SampleRate(v) = config.max_sample_rate();
+        if v >= MIN {
+            return config;
         }
-    });
+    }
+
+    device.supported_output_configs()
+        .expect("error while querying formats")
+        .next()
+        .expect("No supported config")
 }
 
-fn run_audio(rustboy: &mut RustBoy) {
+fn make_audio_stream(rustboy: &mut RustBoy) -> cpal::Stream {
+    use cpal::traits::{
+        DeviceTrait,
+        HostTrait
+    };
+
     let host = cpal::default_host();
-    let event_loop = host.event_loop();
     let device = host.default_output_device().expect("no output device available.");
-    let mut supported_formats_range = device.supported_output_formats()
-        .expect("error while querying formats");
-    let format = supported_formats_range.next()
-        .expect("No supported format")
-        .with_max_sample_rate();
-    let stream_id = event_loop.build_output_stream(&device, &format).unwrap();
-    let sample_rate = format.sample_rate.0 as usize;
 
+    let config = pick_output_config(&device).with_max_sample_rate();
+    let sample_rate = config.sample_rate().0 as usize;
+    println!("Audio sample rate {}", sample_rate);
     let mut audio_handler = rustboy.enable_audio(sample_rate);
-    std::thread::spawn(move || {
-        event_loop.play_stream(stream_id).expect("Stream could not start.");
 
-        event_loop.run(move |_stream_id, stream_result| {
-            use cpal::StreamData::*;
-            use cpal::UnknownTypeOutputBuffer::*;
-
-            let stream_data = match stream_result {
-                Ok(data) => data,
-                Err(e) => {
-                    eprintln!("An error occurred in audio handler: {}", e);
-                    return;
-                }
-            };
-
-            match stream_data {
-                Output { buffer: U16(mut buffer) } => {
-                    let mut packet = vec![0.0; buffer.len()];
-                    audio_handler.get_audio_packet(&mut packet);
-                    for (out, p) in buffer.chunks_exact_mut(2).zip(packet.chunks_exact(2)) {
-                        for (elem, f) in out.iter_mut().zip(p.iter()) {
-                            *elem = (f * u16::max_value() as f32) as u16
-                        }
-                    }
-                },
-                Output { buffer: I16(mut buffer) } => {
-                    let mut packet = vec![0.0; buffer.len()];
-                    audio_handler.get_audio_packet(&mut packet);
-                    for (out, p) in buffer.chunks_exact_mut(2).zip(packet.chunks_exact(2)) {
-                        for (elem, f) in out.iter_mut().zip(p.iter()) {
-                            *elem = (f * i16::max_value() as f32) as i16
-                        }
-                    }
-                },
-                Output { buffer: F32(mut buffer) } => {
-                    audio_handler.get_audio_packet(&mut buffer);
-                },
-                _ => {},
-            }
-        });
-    });
+    device.build_output_stream(
+        &config.into(),
+        move |data: &mut [f32], _| {
+            audio_handler.get_audio_packet(data);
+        },
+        move |err| {
+            println!("Error occurred: {}", err);
+        }
+    ).unwrap()
 }
 
 /*
